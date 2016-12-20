@@ -22,6 +22,7 @@
 	#endif
 #endif
 
+#define DEMUX_2_TO_3
 
 #if defined __AVR_ATtinyX5__
 	#define DATA ?
@@ -51,6 +52,7 @@
 	#endif
 #endif
 
+// single char mappings
 byte mapSegments[] = {
 	//tRrblLmp
 	0b11111100, // 0
@@ -67,11 +69,64 @@ byte mapSegments[] = {
 	0b00000000, // ' '
 };
 
+// 3 digits mapping
+byte mapDisplays[] = {
+	// tempo : "tmp"
+	0b00001110 , 0b00101010 , 0b11001110 ,
+	// times : "tim"
+	0b00001110 , 0b00001000 , 0b00101010 ,
+	// subdivisions : "sub"
+	0b10110110 , 0b00111000 , 0b00111110 ,
+	// time down : "___"
+	0b00010000 , 0b00010000 , 0b00010000 ,
+	// time down : " _ "
+	0b00000000 , 0b00010000 , 0b00000000 ,
+	// time left :"|  "
+	0b00001100 , 0b00000000 , 0b00000000 ,
+	// time left :"'  "
+	0b00000100 , 0b00000000 , 0b00000000 ,
+	// time right: "  |"
+	0b00000000 , 0b00000000 , 0b01100000 ,
+	// time right: "  '"
+	0b00000000 , 0b00000000 , 0b01000000 ,
+	// time up   : "^^^"
+	0b10000000 , 0b10000000 , 0b10000000 ,
+	// time up   : " ^ "
+	0b00000000 , 0b10000000 , 0b00000000 ,
+	// half : " - "
+	0b00000000 , 0b00000010 , 0b00000000 ,
+	// empty: "   "
+	0b00000000 , 0b00000000 , 0b00000000 ,
+};
+#define MSG_TMP    (mapDisplays +  0)
+#define MSG_TIM    (mapDisplays +  3)
+#define MSG_SUB    (mapDisplays +  6)
+#define MSG_DOWN   (mapDisplays +  9)
+#define MSG_DOWN2  (mapDisplays + 12)
+#define MSG_LEFT   (mapDisplays + 15)
+#define MSG_LEFT2  (mapDisplays + 18)
+#define MSG_RIGHT  (mapDisplays + 21)
+#define MSG_RIGHT2 (mapDisplays + 24)
+#define MSG_TOP    (mapDisplays + 27)
+#define MSG_TOP2   (mapDisplays + 30)
+#define MSG_HALF   (mapDisplays + 33)
+#define MSG_NONE   (mapDisplays + 36)
+
 byte currentDisplay[3];
 void displayChars(byte *map) {
 	currentDisplay[0] = map[0];
 	currentDisplay[1] = map[1];
 	currentDisplay[2] = map[2];
+}
+void addChars(byte *map) {
+	currentDisplay[0] |= map[0];
+	currentDisplay[1] |= map[1];
+	currentDisplay[2] |= map[2];
+}
+void subChars(byte *map) {
+	currentDisplay[0] &= ~(map[0]);
+	currentDisplay[1] &= ~(map[1]);
+	currentDisplay[2] &= ~(map[2]);
 }
 
 void displayNumber(int value) {
@@ -88,13 +143,54 @@ void outputChar(byte map) {
 	}
 }
 
+// times are marked during 1/FLASH time duration
+#define FLASH 5
+// tempo times per minute
+byte tempo = 60;
+// times per measure
+byte times =  4;
+// current time
+byte timeNb;
+// subdivisions per time
+byte subs  =  2;
+// number of ticks needed to handle everything (FLASH * times * subs)
+byte nbTicks;
+// current tick
+byte tick;
+
 byte digit = 0;
+byte oldButtons = 0;
 byte buttons = 0;
+#define BUTTON_MINUS 0x04
+#define BUTTON_PLUS  0x02
+#define BUTTON_MODE  0x01
+
+enum {
+	enteringTempo, inTempo,
+	enteringTimes, inTimes,
+	enteringSubs,  inSubs,
+	running
+} menuState = inTempo;
+
+void handleButtons(byte buttons, byte oldButtons) {
+	/**
+	 * press mode -> entering suivant + aff msg associé
+	 * release mode -> in* + aff valeur courante
+	 * press +/- -> setTimer pour démarrer en autorepeat
+	 *   si timer écouler, changer son délai pour dérouler vite
+	 * release +/- -> unset timer
+	 *
+	 * + chaque action nécessite un computeTicks
+	 * + gérer les cas tordus ?
+	 *  press alors qu'on est déjà en entering => ignorer ?
+	 *  plusieurs boutons ?
+	 *  + et - = mise à 0 ? bascule en mode tuner dans une v2.1 ?
+	 */
+}
 
 void updateDisplay(void *, long, int) {
 	// read buttons state
 	pinMode(DATA, INPUT_PULLUP);
-//	_NOP();
 	if (digitalRead(DATA)) {
 		buttons &= ~(1 << digit);
 	} else {
@@ -118,6 +214,10 @@ void updateDisplay(void *, long, int) {
 	} else {
 		currentDisplay[2] &= 0xFE;
 	}
+	if (oldButtons != buttons) {
+		handleButtons(buttons, oldButtons);
+		oldButtons = buttons;
+	}
 
 #ifdef DEMUX_2_TO_3
 	// display one digit
@@ -137,8 +237,6 @@ void updateDisplay(void *, long, int) {
 		digit++;
 	}
 }
-
-int count = 1;
 
 word top, prescale;
 setIntervalTimer tacTimer = -1;
@@ -161,13 +259,57 @@ void tac(unsigned long delay) {
 	tacTimer = setInterval(delay, stopTac, NULL);
 }
 
-void updateCounter(void *, long, int) {
-	count++;
-	displayNumber(count);
-	if (count % 10 == 0) {
+setIntervalTimer ticker;
+void computeTicks() {
+	nbTicks = times * subs * FLASH;
+	long interval = 60000L / (tempo * subs * FLASH);
+	changeInterval(ticker, interval);
+}
+
+void nextTick(void *, long, int) {
+	tick++;
+	if (tick == nbTicks) {
+		tick = 0;
+	}
+	if (tick % (FLASH * subs) == 0) {
+		// new time : find which one, depending on time number and nb times
+		// 2/4 => down,top
+		// 3/4 => down,right,top
+		// 4/4 => down,left,right,top
+		// thus : t0 = down, last = top, previous = right, else = left.
+		timeNb = tick / (FLASH * subs);
+		byte *msg;
+		if (timeNb == 0) {
+			msg = MSG_DOWN;
+		} else if (timeNb == times - 1) {
+			msg = MSG_TOP;
+		} else if (timeNb == times - 2) {
+			msg = MSG_RIGHT;
+		} else {
+			msg = MSG_LEFT;
+		}
+		displayChars(msg);
 		tac(10);
-	} else if (count % 5 == 0) {
-		tac(2);
+	} else if (tick % (FLASH * subs) == 1) {
+		// reduce current time
+		byte *msg;
+		if (timeNb == 0) {
+			msg = MSG_DOWN2;
+		} else if (timeNb == times - 1) {
+			msg = MSG_TOP2;
+		} else if (timeNb == times - 2) {
+			msg = MSG_RIGHT2;
+		} else {
+			msg = MSG_LEFT2;
+		}
+		displayChars(msg);
+	} else if (tick % FLASH == 0) {
+		// add half
+		addChars(MSG_HALF);
+		tac(5);
+	} else if (tick % FLASH == 1) {
+		// remove half
+		subChars(MSG_HALF);
 	}
 }
 
@@ -200,7 +342,8 @@ void setup() {
 	unsigned long frequency = 294 * 2; // D, octave 1
 	computePWM(2, frequency, prescale, top);
 
-	setInterval(100, updateCounter, NULL);
+	ticker = setInterval(10000, nextTick, NULL);
+	computeTicks();
 	setInterval(3, updateDisplay, NULL);
 }
 
