@@ -50,6 +50,7 @@
 		#define DIGIT_2 9
 		#define DIGIT_3 10
 	#endif
+//	#define DEBUG
 #endif
 
 // single char mappings
@@ -98,9 +99,9 @@ byte mapDisplays[] = {
 	// empty: "   "
 	0b00000000 , 0b00000000 , 0b00000000 ,
 };
-#define MSG_TMP    (mapDisplays +  0)
-#define MSG_TIM    (mapDisplays +  3)
-#define MSG_SUB    (mapDisplays +  6)
+#define MSG_TEMPO  (mapDisplays +  0)
+#define MSG_TIMES  (mapDisplays +  3)
+#define MSG_SUBS   (mapDisplays +  6)
 #define MSG_DOWN   (mapDisplays +  9)
 #define MSG_DOWN2  (mapDisplays + 12)
 #define MSG_LEFT   (mapDisplays + 15)
@@ -147,11 +148,13 @@ void outputChar(byte map) {
 #define FLASH 5
 // tempo times per minute
 byte tempo = 60;
-// times per measure
+#define TEMPO_MIN 30
+#define TEMPO_MAX 180
+// times per measure : 1 - 4
 byte times =  4;
 // current time
 byte timeNb;
-// subdivisions per time
+// subdivisions per time : 1 - 4
 byte subs  =  2;
 // number of ticks needed to handle everything (FLASH * times * subs)
 byte nbTicks;
@@ -159,8 +162,10 @@ byte nbTicks;
 byte tick;
 
 byte digit = 0;
-byte oldButtons = 0;
 byte buttons = 0;
+byte oldButtons;
+#define DEBOUNCE_DELAY 10
+byte debounce = DEBOUNCE_DELAY;
 #define BUTTON_MINUS 0x04
 #define BUTTON_PLUS  0x02
 #define BUTTON_MODE  0x01
@@ -170,27 +175,222 @@ enum {
 	enteringTimes, inTimes,
 	enteringSubs,  inSubs,
 	running
-} menuState = inTempo;
+} menuState = running;
 
+word top, prescale;
+setIntervalTimer tacTimer = -1;
+void stopTac(void *, long, int) {
+	setPWM(2, top,
+			COMPARE_OUTPUT_MODE_NONE, top,
+			COMPARE_OUTPUT_MODE_NONE, 0,
+			WGM_2_FAST_OCRA, prescale);
+	//digitalWrite(BEEP, LOW);
+	changeInterval(tacTimer, SET_INTERVAL_PAUSED);
+}
+void tac(unsigned long delay) {
+	setPWM(2, top,
+			COMPARE_OUTPUT_MODE_TOGGLE, top / 2,
+			COMPARE_OUTPUT_MODE_NONE, 0,
+			WGM_2_FAST_OCRA, prescale);
+	changeInterval(tacTimer, delay);
+}
+
+setIntervalTimer tickTimer;
+void computeTicks() {
+	nbTicks = times * subs * FLASH;
+	long interval = 60000L / (tempo * subs * FLASH);
+	tick = 0;
+	changeInterval(tickTimer, interval);
+}
+
+void nextTick(void *, long, int) {
+	tick++;
+	if (tick == nbTicks) {
+		tick = 0;
+	}
+	if (tick % (FLASH * subs) == 0) {
+		// new time : find which one, depending on time number and nb times
+		// 2/4 => down,top
+		// 3/4 => down,right,top
+		// 4/4 => down,left,right,top
+		// thus : t0 = down, last = top, previous = right, else = left.
+		if(menuState == running) {
+			timeNb = tick / (FLASH * subs);
+			byte *msg;
+			if (timeNb == 0) {
+				msg = MSG_DOWN;
+			} else if (timeNb == times - 1) {
+				msg = MSG_TOP;
+			} else if (timeNb == times - 2) {
+				msg = MSG_RIGHT;
+			} else {
+				msg = MSG_LEFT;
+			}
+			displayChars(msg);
+		}
+		tac(10);
+	} else if (tick % (FLASH * subs) == 1) {
+		if(menuState == running) {
+			// reduce current time
+			byte *msg;
+			if (timeNb == 0) {
+				msg = MSG_DOWN2;
+			} else if (timeNb == times - 1) {
+				msg = MSG_TOP2;
+			} else if (timeNb == times - 2) {
+				msg = MSG_RIGHT2;
+			} else {
+				msg = MSG_LEFT2;
+			}
+			displayChars(msg);
+		}
+	} else if (tick % FLASH == 0) {
+		if(menuState == running) {
+			// add half
+			addChars(MSG_HALF);
+		}
+		tac(5);
+	} else if (tick % FLASH == 1) {
+		if(menuState == running) {
+			// remove half
+			subChars(MSG_HALF);
+		}
+	}
+}
+
+void doPlus() {
+#ifdef DEBUG
+	Serial.print('+');
+#endif
+	switch(menuState) {
+	case inTempo:
+		tempo += 2;
+		if (tempo > TEMPO_MAX) {
+			tempo = TEMPO_MIN;
+		}
+		displayNumber(tempo);
+		break;
+	case inTimes:
+		if (times < 4) {
+			times++;
+			displayNumber(times);
+		}
+		break;
+	case inSubs:
+		if (subs < 4) {
+			subs++;
+			displayNumber(subs);
+		}
+		break;
+	}
+	computeTicks();
+}
+void doMinus() {
+#ifdef DEBUG
+	Serial.print('-');
+#endif
+	switch(menuState) {
+	case inTempo:
+		tempo -= 2;
+		if (tempo < TEMPO_MIN) {
+			tempo = TEMPO_MAX;
+		}
+		displayNumber(tempo);
+		break;
+	case inTimes:
+		if (times > 1) {
+			times--;
+			displayNumber(times);
+		}
+		break;
+	case inSubs:
+		if (subs > 1) {
+			subs--;
+			displayNumber(subs);
+		}
+		break;
+	}
+	computeTicks();
+}
+
+#define AUTOREPEAT_DELAY 1000
+#define AUTOREPEAT_SPEED 100
+setIntervalTimer autorepeatTimer;
+
+void autorepeat(void *, long, int) {
+	changeInterval(autorepeatTimer, AUTOREPEAT_SPEED);
+	if (buttons & BUTTON_PLUS) {
+		doPlus();
+	} else {
+		doMinus();
+	}
+}
+
+#define PRESS(which) (!(oldButtons & which) && (buttons & which))
+#define RELEASE(which) ((oldButtons & which) && !(buttons & which))
 void handleButtons(byte buttons, byte oldButtons) {
-	/**
-	 * press mode -> entering suivant + aff msg associé
-	 * release mode -> in* + aff valeur courante
-	 * press +/- -> setTimer pour démarrer en autorepeat
-	 *   si timer écouler, changer son délai pour dérouler vite
-	 * release +/- -> unset timer
-	 *
-	 * + chaque action nécessite un computeTicks
-	 * + gérer les cas tordus ?
-	 *  press alors qu'on est déjà en entering => ignorer ?
-	 *  plusieurs boutons ?
-	 *  + et - = mise à 0 ? bascule en mode tuner dans une v2.1 ?
-	 */
+#ifdef DEBUG
+	Serial.print('b');
+#endif
+	// press "mode" button -> enter next menu item
+	if (PRESS(BUTTON_MODE)) {
+		switch(menuState) {
+		case running:
+			menuState = enteringTempo;
+			displayChars(MSG_TEMPO);
+			return;
+		case inTempo:
+			menuState = enteringTimes;
+			displayChars(MSG_TIMES);
+			return;
+		case inTimes:
+			menuState = enteringSubs;
+			displayChars(MSG_SUBS);
+			return;
+		case inSubs:
+			menuState = running;
+			displayChars(MSG_NONE);
+			return;
+		default:
+			return;
+		}
+	}
+	// release "mode" button -> display current value
+	if (RELEASE(BUTTON_MODE)) {
+		switch(menuState) {
+		case enteringTempo:
+			menuState = inTempo;
+			displayNumber(tempo);
+			return;
+		case enteringTimes:
+			menuState = inTimes;
+			displayNumber(times);
+			return;
+		case enteringSubs:
+			menuState = inSubs;
+			displayNumber(subs);
+			return;
+		default:
+			return;
+		}
+	}
+	if (PRESS(BUTTON_PLUS)) {
+		changeInterval(autorepeatTimer, AUTOREPEAT_DELAY);
+		doPlus();
+	} else if (RELEASE(BUTTON_PLUS)) {
+		changeInterval(autorepeatTimer, SET_INTERVAL_PAUSED);
+	} else if (PRESS(BUTTON_MINUS)) {
+		changeInterval(autorepeatTimer, AUTOREPEAT_DELAY);
+		doMinus();
+	} else if (RELEASE(BUTTON_MINUS)) {
+		changeInterval(autorepeatTimer, SET_INTERVAL_PAUSED);
+	}
 }
 
 void updateDisplay(void *, long, int) {
 	// read buttons state
 	pinMode(DATA, INPUT_PULLUP);
+	_NOP();
 	if (digitalRead(DATA)) {
 		buttons &= ~(1 << digit);
 	} else {
@@ -199,24 +399,33 @@ void updateDisplay(void *, long, int) {
 	pinMode(DATA, OUTPUT);
 
 	// set 'dot' segment like button states
-	if (buttons & 0x04) {
+	if (buttons & BUTTON_MODE) {
 		currentDisplay[0] |= 0x01;
 	} else {
 		currentDisplay[0] &= 0xFE;
 	}
-	if (buttons & 0x02) {
+	if (buttons & BUTTON_MINUS) {
 		currentDisplay[1] |= 0x01;
 	} else {
 		currentDisplay[1] &= 0xFE;
 	}
-	if (buttons & 0x01) {
+	if (buttons & BUTTON_PLUS) {
 		currentDisplay[2] |= 0x01;
 	} else {
 		currentDisplay[2] &= 0xFE;
 	}
+
+	// handle button change
 	if (oldButtons != buttons) {
-		handleButtons(buttons, oldButtons);
-		oldButtons = buttons;
+		if (debounce == 0) {
+			handleButtons(buttons, oldButtons);
+			oldButtons = buttons;
+			debounce = DEBOUNCE_DELAY;
+		} else {
+			debounce--;
+		}
+	} else {
+		debounce = DEBOUNCE_DELAY;
 	}
 
 #ifdef DEMUX_2_TO_3
@@ -235,81 +444,6 @@ void updateDisplay(void *, long, int) {
 		digit = 0;
 	} else {
 		digit++;
-	}
-}
-
-word top, prescale;
-setIntervalTimer tacTimer = -1;
-void stopTac(void *, long, int) {
-	setPWM(2, top,
-			COMPARE_OUTPUT_MODE_NONE, top,
-			COMPARE_OUTPUT_MODE_NONE, 0,
-			WGM_2_FAST_OCRA, prescale);
-	//digitalWrite(BEEP, LOW);
-	changeInterval(tacTimer, 0);
-	tacTimer = -1;
-}
-void tac(unsigned long delay) {
-	setPWM(2, top,
-			COMPARE_OUTPUT_MODE_TOGGLE, top / 2,
-			COMPARE_OUTPUT_MODE_NONE, 0,
-			WGM_2_FAST_OCRA, prescale);
-	//tone(BEEP, 294 * 2, 10);
-	//noTone(BEEP);//digitalWrite(BEEP, HIGH);
-	tacTimer = setInterval(delay, stopTac, NULL);
-}
-
-setIntervalTimer ticker;
-void computeTicks() {
-	nbTicks = times * subs * FLASH;
-	long interval = 60000L / (tempo * subs * FLASH);
-	changeInterval(ticker, interval);
-}
-
-void nextTick(void *, long, int) {
-	tick++;
-	if (tick == nbTicks) {
-		tick = 0;
-	}
-	if (tick % (FLASH * subs) == 0) {
-		// new time : find which one, depending on time number and nb times
-		// 2/4 => down,top
-		// 3/4 => down,right,top
-		// 4/4 => down,left,right,top
-		// thus : t0 = down, last = top, previous = right, else = left.
-		timeNb = tick / (FLASH * subs);
-		byte *msg;
-		if (timeNb == 0) {
-			msg = MSG_DOWN;
-		} else if (timeNb == times - 1) {
-			msg = MSG_TOP;
-		} else if (timeNb == times - 2) {
-			msg = MSG_RIGHT;
-		} else {
-			msg = MSG_LEFT;
-		}
-		displayChars(msg);
-		tac(10);
-	} else if (tick % (FLASH * subs) == 1) {
-		// reduce current time
-		byte *msg;
-		if (timeNb == 0) {
-			msg = MSG_DOWN2;
-		} else if (timeNb == times - 1) {
-			msg = MSG_TOP2;
-		} else if (timeNb == times - 2) {
-			msg = MSG_RIGHT2;
-		} else {
-			msg = MSG_LEFT2;
-		}
-		displayChars(msg);
-	} else if (tick % FLASH == 0) {
-		// add half
-		addChars(MSG_HALF);
-		tac(5);
-	} else if (tick % FLASH == 1) {
-		// remove half
-		subChars(MSG_HALF);
 	}
 }
 
@@ -342,9 +476,22 @@ void setup() {
 	unsigned long frequency = 294 * 2; // D, octave 1
 	computePWM(2, frequency, prescale, top);
 
-	ticker = setInterval(10000, nextTick, NULL);
+	// reserve timers, but stop them
+	autorepeatTimer = setInterval(SET_INTERVAL_PAUSED, autorepeat, NULL);
+	tacTimer = setInterval(SET_INTERVAL_PAUSED, stopTac, NULL);
+	tickTimer = setInterval(SET_INTERVAL_PAUSED, nextTick, NULL);
 	computeTicks();
-	setInterval(3, updateDisplay, NULL);
+	setIntervalTimer updateDisplayTimer = setInterval(3, updateDisplay, NULL);
+
+#ifdef DEBUG
+	Serial.begin(DEFAULT_BAUDRATE);
+	Serial.print("tickTimer = ");Serial.println(tickTimer);
+	Serial.print("updateDisplayTimer = ");Serial.println(updateDisplayTimer);
+	Serial.print("autorepeatTimer = ");Serial.println(autorepeatTimer);
+	Serial.print("tacTimer = ");Serial.println(tacTimer);
+	Serial.println("Ready ..");
+#endif
+
 }
 
 void loop() {
