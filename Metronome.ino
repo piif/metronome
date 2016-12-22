@@ -1,5 +1,5 @@
 // PIF_TOOL_CHAIN_OPTION: UPLOAD_OPTIONS := -c "raw,cr"
-// PIF_TOOL_CHAIN_OPTION: EXTRA_LIBS := ArduinoLibs ArduinoTools
+// PIF_TOOL_CHAIN_OPTION: EXTRA_LIBS := ArduinoTools
 
 #include <Arduino.h>
 
@@ -25,13 +25,17 @@
 #define DEMUX_2_TO_3
 
 #if defined __AVR_ATtinyX5__
-	#define DATA ?
-	#define CLOCK ?
-	#define BEEP PWM_1_A // = 1
+	#define DATA 2
+	#define CLOCK 3
+	#define BEEP PWM_1_B // = 4
+	#define BEEP_PWM_MODE_ON  SET_PWM_1_B
+	#define BEEP_PWM_MODE_OFF SET_PWM_1_NONE
+	#define BEEP_PWM_ON  COMPARE_OUTPUT_MODE_1_SET_NONE
+	#define BEEP_PWM_OFF COMPARE_OUTPUT_MODE_1_NONE_NONE
 
 	#ifdef DEMUX_2_TO_3
-		#define DIGIT_L ?
-		#define DIGIT_H ?
+		#define DIGIT_L 0
+		#define DIGIT_H 1
 	#else
 		#define DIGIT_1 ?
 		#define DIGIT_2 ?
@@ -40,7 +44,11 @@
 #else
 	#define DATA 2
 	#define CLOCK 3
-	#define BEEP PWM_2_A // = 11
+	#define BEEP PWM_1_B // = 10
+	#define BEEP_PWM_MODE_ON  WGM_1_FAST_ICR
+	#define BEEP_PWM_MODE_OFF WGM_1_FAST_ICR
+	#define BEEP_PWM_ON  COMPARE_OUTPUT_MODE_TOGGLE
+	#define BEEP_PWM_OFF COMPARE_OUTPUT_MODE_NONE
 
 	#ifdef DEMUX_2_TO_3
 		#define DIGIT_L 8
@@ -180,18 +188,18 @@ enum {
 word top, prescale;
 setIntervalTimer tacTimer = -1;
 void stopTac(void *, long, int) {
-	setPWM(2, top,
-			COMPARE_OUTPUT_MODE_NONE, top,
+	setPWM(1, 0,
 			COMPARE_OUTPUT_MODE_NONE, 0,
-			WGM_2_FAST_OCRA, prescale);
+			COMPARE_OUTPUT_MODE_NONE, 0,
+			BEEP_PWM_MODE_OFF, prescale);
 	//digitalWrite(BEEP, LOW);
 	changeInterval(tacTimer, SET_INTERVAL_PAUSED);
 }
 void tac(unsigned long delay) {
-	setPWM(2, top,
-			COMPARE_OUTPUT_MODE_TOGGLE, top / 2,
+	setPWM(1, top,
 			COMPARE_OUTPUT_MODE_NONE, 0,
-			WGM_2_FAST_OCRA, prescale);
+			COMPARE_OUTPUT_MODE_TOGGLE, top / 2,
+			BEEP_PWM_MODE_ON, prescale);
 	changeInterval(tacTimer, delay);
 }
 
@@ -390,7 +398,7 @@ void handleButtons(byte buttons, byte oldButtons) {
 void updateDisplay(void *, long, int) {
 	// read buttons state
 	pinMode(DATA, INPUT_PULLUP);
-	_NOP();
+//	_NOP();
 	if (digitalRead(DATA)) {
 		buttons &= ~(1 << digit);
 	} else {
@@ -448,6 +456,12 @@ void updateDisplay(void *, long, int) {
 }
 
 void setup() {
+#ifdef __AVR_ATtinyX5__
+	// set clock frequency prescaler to 1 => 8MHz
+	CLKPR = 0x80; // set high bit to enabled prescale write
+	CLKPR = 0x00; // set prescale to 0 = /1
+#endif
+
 	pinMode(DATA, OUTPUT);
 	pinMode(CLOCK, OUTPUT);
 	pinMode(BEEP, OUTPUT);
@@ -475,7 +489,8 @@ void setup() {
 
 	unsigned long frequency = 294 * 2; // D, octave 1
 	computePWM(2, frequency, prescale, top);
-
+//times=prescale;
+//subs=top;
 	// reserve timers, but stop them
 	autorepeatTimer = setInterval(SET_INTERVAL_PAUSED, autorepeat, NULL);
 	tacTimer = setInterval(SET_INTERVAL_PAUSED, stopTac, NULL);

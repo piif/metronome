@@ -48,6 +48,10 @@ ifneq (,$(findstring ArduinoTools,${EXTRA_LIBS}))
   $(info WITH TOOLS)
 endif
 
+attinyx5: target/attinyx5/Metronome.hex
+	/opt/arduino-1.6.7/hardware/tools/avr/bin/avrdude -C/opt/arduino-1.6.7/hardware/tools/avr/etc/avrdude.conf \
+	  -v -pattiny85 -cstk500v1 -P/dev/ttyACM0 -b19200 -Uflash:w:target/attinyx5/Metronome.hex:i 
+
 ## exemples :
 # make SOURCE_DIRS=alternate
 # MAIN_SOURCE=alternate/firmware.cpp
