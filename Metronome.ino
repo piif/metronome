@@ -28,10 +28,12 @@
 	#define DATA 2
 	#define CLOCK 3
 	#define BEEP PWM_1_B // = 4
-	#define BEEP_PWM_MODE_ON  SET_PWM_1_B
+	#define BEEP_PWM 1
+	#define BEEP_PWM_MODE_ON WGM_1_FAST_OCR1C | SET_PWM_1_B
 	#define BEEP_PWM_MODE_OFF SET_PWM_1_NONE
-	#define BEEP_PWM_ON  COMPARE_OUTPUT_MODE_1_SET_NONE
-	#define BEEP_PWM_OFF COMPARE_OUTPUT_MODE_1_NONE_NONE
+	// doesn't work with COMPARE_OUTPUT_MODE_1_SET_NONE : why ???
+	#define BEEP_PWM_OUTPUT_ON COMPARE_OUTPUT_MODE_1_CLEAR_NONE
+	#define BEEP_PWM_OUTPUT_OFF COMPARE_OUTPUT_MODE_1_NONE_NONE
 
 	#ifdef DEMUX_2_TO_3
 		#define DIGIT_L 0
@@ -44,11 +46,12 @@
 #else
 	#define DATA 2
 	#define CLOCK 3
+	#define BEEP_PWM 1
 	#define BEEP PWM_1_B // = 10
 	#define BEEP_PWM_MODE_ON  WGM_1_FAST_ICR
 	#define BEEP_PWM_MODE_OFF WGM_1_FAST_ICR
-	#define BEEP_PWM_ON  COMPARE_OUTPUT_MODE_TOGGLE
-	#define BEEP_PWM_OFF COMPARE_OUTPUT_MODE_NONE
+	#define BEEP_PWM_OUTPUT_ON  COMPARE_OUTPUT_MODE_TOGGLE
+	#define BEEP_PWM_OUTPUT_OFF COMPARE_OUTPUT_MODE_NONE
 
 	#ifdef DEMUX_2_TO_3
 		#define DIGIT_L 8
@@ -185,20 +188,26 @@ enum {
 	running
 } menuState = running;
 
-word top, prescale;
+word top, prescale; // initialized once in setup
 setIntervalTimer tacTimer = -1;
 void stopTac(void *, long, int) {
-	setPWM(1, 0,
-			COMPARE_OUTPUT_MODE_NONE, 0,
-			COMPARE_OUTPUT_MODE_NONE, 0,
+	setPWM(BEEP_PWM, 0,
+			BEEP_PWM_OUTPUT_OFF, 0,
+			BEEP_PWM_OUTPUT_OFF ,0,
 			BEEP_PWM_MODE_OFF, prescale);
-	//digitalWrite(BEEP, LOW);
+//	GTCCR = 0;
+//	TCCR1 = 0;
 	changeInterval(tacTimer, SET_INTERVAL_PAUSED);
 }
 void tac(unsigned long delay) {
-	setPWM(1, top,
-			COMPARE_OUTPUT_MODE_NONE, 0,
-			COMPARE_OUTPUT_MODE_TOGGLE, top / 2,
+//	TCNT1 = 0;
+//	OCR1A = top / 2;
+//	OCR1C = top;
+//	TCCR1 = 0b10000111;
+//	GTCCR = 0b01110000;
+	setPWM(BEEP_PWM, top,
+			BEEP_PWM_OUTPUT_OFF, 0,
+			BEEP_PWM_OUTPUT_ON, top / 2,
 			BEEP_PWM_MODE_ON, prescale);
 	changeInterval(tacTimer, delay);
 }
@@ -488,9 +497,12 @@ void setup() {
 #endif
 
 	unsigned long frequency = 294 * 2; // D, octave 1
-	computePWM(2, frequency, prescale, top);
-//times=prescale;
-//subs=top;
+	computePWM(BEEP_PWM, frequency, prescale, top);
+	// usefull to debug on ATtiny
+	// tempo=frequency;
+	// times=prescale;
+	// subs=top;
+
 	// reserve timers, but stop them
 	autorepeatTimer = setInterval(SET_INTERVAL_PAUSED, autorepeat, NULL);
 	tacTimer = setInterval(SET_INTERVAL_PAUSED, stopTac, NULL);
